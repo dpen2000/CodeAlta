@@ -1668,6 +1668,8 @@ public sealed class AgentSession : IAgentSession, IAgentCompactionOutcomeProvide
                 HttpClient = BuiltInToolHttpClient,
                 DisabledTools = _options.DisabledBuiltInTools,
                 WriteGuard = _options.WriteGuard,
+                ReadGuard = _options.ReadGuard,
+                ProcessSandbox = _options.ProcessSandbox,
                 CommandGuard = _options.CommandGuard,
             });
         return _options.Tools is { Count: > 0 }

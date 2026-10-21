@@ -55,6 +55,14 @@ public sealed class AgentBuiltInToolOptions
     /// </summary>
     public AgentWriteGuard? WriteGuard { get; init; }
 
+    /// <summary>
+    /// Gets where the file-reading tools (<c>read_file</c>, <c>view_image</c>, <c>list_dir</c>, <c>grep</c>) may read; null for no limit.
+    /// </summary>
+    public AgentReadGuard? ReadGuard { get; init; }
+
+    /// <summary>Gets the operating-system sandbox <c>shell_command</c> runs its processes in; null runs them unwrapped.</summary>
+    public AgentProcessSandbox? ProcessSandbox { get; init; }
+
     /// <summary>Gets what checks each shell command before it runs, whatever the permission mode; null for no check.</summary>
     public AgentCommandGuard? CommandGuard { get; init; }
 

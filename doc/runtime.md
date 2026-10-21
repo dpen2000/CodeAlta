@@ -1583,3 +1583,7 @@ observers (as visible panes), plugins that do or do not look at events, a reader
 When the measured turns time out, it prints what the sessions still running last recorded. For a CPU profile, run it
 under `dotnet-trace` (`dotnet dnx dotnet-trace collect --diagnostic-port ...` with `DOTNET_DiagnosticPorts=<port>,suspend`).
 
+
+## Repository confinement of file reads and shell commands
+
+Built-in tools that read files (`read_file`, `view_image`, `list_dir`, `grep`) go through `AgentReadGuard`: a path (links resolved) must be inside the session's working directory, worktree, project roots or scratchpad. `shell_command` must start inside those folders and runs in an [MXC](https://github.com/microsoft/mxc) container (`Microsoft.Mxc.Sdk`, via `AgentProcessSandbox`): ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS. The process may write only those folders and the temp folder, and read only them plus tool and system folders. Where MXC cannot contain processes the command is refused: `AgentProcessSandbox.RequireSandbox` defaults to true.

@@ -1870,6 +1870,8 @@ public sealed partial class SessionRuntimeService : IAsyncDisposable
             Tools = tools,
             DisabledBuiltInTools = instructions.PromptBundle?.DisabledTools,
             WriteGuard = CreateWriteGuard(instructions.PromptBundle?.DisabledTools, options.WorkingDirectory, worktree, options.ProjectRoots),
+            ReadGuard = CreateReadGuard(options.WorkingDirectory, worktree, options.ProjectRoots),
+            ProcessSandbox = CreateProcessSandbox(options.WorkingDirectory, worktree, options.ProjectRoots),
             CommandGuard = CreateCommandGuard(session.SessionId),
             OnPermissionRequest = options.OnPermissionRequest,
             OnUserInputRequest = options.OnUserInputRequest,
@@ -3797,6 +3799,19 @@ public sealed partial class SessionRuntimeService : IAsyncDisposable
             string.IsNullOrWhiteSpace(_catalogOptions.StateRoot) ? [] : [Path.Combine(_catalogOptions.StateRoot, "scratchpad")],
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     }
+
+    // The folders a session reads and runs commands in: the repository it works in, never the rest of the machine.
+    private IEnumerable<string> GetRepositoryRoots(string? workingDirectory, string? worktree, IReadOnlyList<string>? projectRoots)
+    {
+        string?[] roots = [workingDirectory, worktree, .. projectRoots ?? [], string.IsNullOrWhiteSpace(_catalogOptions.StateRoot) ? null : Path.Combine(_catalogOptions.StateRoot, "scratchpad")];
+        return roots.Where(static root => !string.IsNullOrWhiteSpace(root))!;
+    }
+
+    private Agent.Runtime.Tools.AgentReadGuard CreateReadGuard(string? workingDirectory, string? worktree, IReadOnlyList<string>? projectRoots)
+        => new(GetRepositoryRoots(workingDirectory, worktree, projectRoots));
+
+    private Agent.Runtime.Tools.AgentProcessSandbox CreateProcessSandbox(string? workingDirectory, string? worktree, IReadOnlyList<string>? projectRoots)
+        => new(GetRepositoryRoots(workingDirectory, worktree, projectRoots));
 
     private async Task<ProjectDescriptor?> ResolveProjectAsync(SessionViewDescriptor session, CancellationToken cancellationToken)
     {

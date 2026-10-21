@@ -26,6 +26,7 @@
   <ItemGroup>
     <PackageReference Include="DiffPlex" />
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Mxc.Sdk" />
     <!-- Images a tool gives the model are checked and resized with Skia: its native library is named for
          every platform CodeAlta ships on instead of relying on what another package brings. -->
     <PackageReference Include="SkiaSharp" />
