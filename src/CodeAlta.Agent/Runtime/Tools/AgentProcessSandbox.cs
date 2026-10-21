@@ -18,9 +18,9 @@ public sealed class AgentProcessSandbox
 
     /// <summary>Creates the sandbox of a session.</summary>
     /// <param name="roots">The folders the sandboxed processes may read and write.</param>
-    /// <param name="requireSandbox">True to refuse to run a command where MXC cannot contain it.</param>
+    /// <param name="requireSandbox">True (the default) to refuse to run a command where MXC cannot contain it; false to run it unwrapped instead.</param>
     /// <exception cref="ArgumentNullException"><paramref name="roots"/> is null.</exception>
-    public AgentProcessSandbox(IEnumerable<string> roots, bool requireSandbox = false)
+    public AgentProcessSandbox(IEnumerable<string> roots, bool requireSandbox = true)
     {
         ArgumentNullException.ThrowIfNull(roots);
         _roots = [.. roots.Where(static r => !string.IsNullOrWhiteSpace(r)).Select(static r => Path.GetFullPath(r)).Distinct()];
