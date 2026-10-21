@@ -266,6 +266,11 @@ public static class AgentBuiltInToolFactory
     {
         var path = GetRequiredString(invocation.Arguments, "path");
         var resolvedPath = ResolvePath(options.WorkingDirectory, path);
+        if (options.ReadGuard?.Check(resolvedPath) is { } readRefusal)
+        {
+            return Task.FromResult(Failure(readRefusal));
+        }
+
         if (!File.Exists(resolvedPath))
         {
             return Task.FromResult(Failure($"File '{resolvedPath}' was not found."));
@@ -319,6 +324,11 @@ public static class AgentBuiltInToolFactory
     {
         var path = GetRequiredString(invocation.Arguments, "path");
         var resolvedPath = ResolvePath(options.WorkingDirectory, path);
+        if (options.ReadGuard?.Check(resolvedPath) is { } readRefusal)
+        {
+            return Failure(readRefusal);
+        }
+
         if (Directory.Exists(resolvedPath))
         {
             return Failure($"'{resolvedPath}' is a directory. {ViewImageToolName} reads one image file.");
@@ -393,6 +403,11 @@ public static class AgentBuiltInToolFactory
     {
         var path = GetOptionalString(invocation.Arguments, "path");
         var resolvedPath = ResolvePath(options.WorkingDirectory, path);
+        if (options.ReadGuard?.Check(resolvedPath) is { } readRefusal)
+        {
+            return Task.FromResult(Failure(readRefusal));
+        }
+
         if (File.Exists(resolvedPath))
         {
             return Task.FromResult(Failure($"Path '{resolvedPath}' is not a directory."));
@@ -431,6 +446,11 @@ public static class AgentBuiltInToolFactory
 
         foreach (var targetPath in targetPaths)
         {
+            if (options.ReadGuard?.Check(targetPath) is { } readRefusal)
+            {
+                return Task.FromResult(Failure(readRefusal));
+            }
+
             if (!File.Exists(targetPath) && !Directory.Exists(targetPath))
             {
                 return Task.FromResult(Failure($"Path '{targetPath}' was not found."));
@@ -675,7 +695,17 @@ public static class AgentBuiltInToolFactory
                 return Failure($"Unsupported permission decision '{decision.Kind}'.");
         }
 
+        if (options.ReadGuard?.Check(workdir) is { } workdirRefusal)
+        {
+            return Failure(workdirRefusal);
+        }
+
         var processSpec = CreateShellProcessSpec(command, workdir, login, options.Environment);
+        if (options.ProcessSandbox is { } sandbox && !sandbox.TryWrap(processSpec.StartInfo) && sandbox.RequireSandbox)
+        {
+            return Failure("shell_command was refused: no operating-system sandbox is available on this system.");
+        }
+
         using var process = new Process
         {
             StartInfo = processSpec.StartInfo,

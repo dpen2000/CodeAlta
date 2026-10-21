@@ -1583,3 +1583,7 @@ observers (as visible panes), plugins that do or do not look at events, a reader
 When the measured turns time out, it prints what the sessions still running last recorded. For a CPU profile, run it
 under `dotnet-trace` (`dotnet dnx dotnet-trace collect --diagnostic-port ...` with `DOTNET_DiagnosticPorts=<port>,suspend`).
 
+
+## Repository confinement of file reads and shell commands
+
+Built-in tools that read files (`read_file`, `view_image`, `list_dir`, `grep`) go through `AgentReadGuard`: a path (links resolved) must be inside the session's working directory, worktree, project roots or scratchpad. `shell_command` must start inside those folders and, where available, runs wrapped by `AgentProcessSandbox` (bubblewrap on Linux, `sandbox-exec` on macOS) so the process can read and write only those folders plus system program folders. Windows has no wrapper yet: the command runs unwrapped unless `AgentProcessSandbox.RequireSandbox` is set.

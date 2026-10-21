@@ -173,6 +173,16 @@ public class AgentSessionCreateOptions
     public CodeAlta.Agent.Runtime.Tools.AgentWriteGuard? WriteGuard { get; init; }
 
     /// <summary>
+    /// Gets or initializes where the built-in file-reading tools may read; <see langword="null"/> for no limit.
+    /// </summary>
+    public CodeAlta.Agent.Runtime.Tools.AgentReadGuard? ReadGuard { get; init; }
+
+    /// <summary>
+    /// Gets or initializes the operating-system sandbox the built-in <c>shell_command</c> runs in; <see langword="null"/> for none.
+    /// </summary>
+    public CodeAlta.Agent.Runtime.Tools.AgentProcessSandbox? ProcessSandbox { get; init; }
+
+    /// <summary>
     /// Gets or initializes what checks each shell command of the session before it runs, whatever the permission
     /// mode: the built-in shell tool and the shell of a provider that asks CodeAlta first. <see langword="null"/> for no check.
     /// </summary>
