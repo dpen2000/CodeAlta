@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.V1.Policy;
+using XenoAtom.Logging;
 
 namespace CodeAlta.Agent.Runtime.Tools;
 
@@ -14,6 +15,8 @@ namespace CodeAlta.Agent.Runtime.Tools;
 /// </remarks>
 public sealed class AgentProcessSandbox
 {
+    private static readonly Logger Logger = LogManager.GetLogger("CodeAlta.Agent.Sandbox");
+
     private readonly string[] _roots;
 
     /// <summary>Creates the sandbox of a session.</summary>
@@ -115,7 +118,50 @@ public sealed class AgentProcessSandbox
     public MxcProcess? TrySpawn(ProcessStartInfo startInfo, int? timeoutMs = null)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
-        return IsAvailable() ? MxcContainer.Spawn(CreateRequest(startInfo, timeoutMs)) : null;
+        PlatformSupport? support = null;
+        string? failure = null;
+        try
+        {
+            support = MxcPlatform.GetPlatformSupport();
+        }
+        catch (Exception ex) when (ex is MxcException or DllNotFoundException or BadImageFormatException or EntryPointNotFoundException or PlatformNotSupportedException)
+        {
+            failure = ex.Message;
+        }
+
+        if (support is not { IsSupported: true })
+        {
+            Log(() => $"MXC sandbox unavailable: {failure ?? support?.Reason ?? "unsupported platform"}; requireSandbox={RequireSandbox} workingDirectory='{startInfo.WorkingDirectory}'");
+            return null;
+        }
+
+        var request = CreateRequest(startInfo, timeoutMs);
+        // The environment and the command line may hold secrets: they are not logged, only the program.
+        Log(() => $"MXC sandbox spawn: backends=[{string.Join(", ", support.AvailableMethods)}] program='{startInfo.FileName}' workingDirectory='{request.WorkingDirectory}' timeoutMs={request.TimeoutMs?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"} "
+            + $"readwrite=[{string.Join(", ", request.Filesystem?.ReadwritePaths ?? [])}] readonly=[{string.Join(", ", request.Filesystem?.ReadonlyPaths ?? [])}] denied=[{string.Join(", ", request.Filesystem?.DeniedPaths ?? [])}]");
+        try
+        {
+            var process = MxcContainer.Spawn(request);
+            if (process.Warnings.Count > 0)
+            {
+                Log(() => $"MXC sandbox warnings: {string.Join("; ", process.Warnings)}");
+            }
+
+            return process;
+        }
+        catch (MxcException ex)
+        {
+            Log(() => $"MXC sandbox spawn failed: code={ex.Code} native={ex.NativeCode} {ex.Message}");
+            throw;
+        }
+    }
+
+    private static void Log(Func<string> message)
+    {
+        if (LogManager.IsInitialized)
+        {
+            Logger.Info(message());
+        }
     }
 
     private static void AddFragment(FilesystemPolicyResult fragment, List<string> readOnly, List<string> readWrite)
