@@ -701,28 +701,30 @@ public static class AgentBuiltInToolFactory
         }
 
         var processSpec = CreateShellProcessSpec(command, workdir, login, options.Environment);
-        if (options.ProcessSandbox is { } sandbox && !sandbox.TryWrap(processSpec.StartInfo) && sandbox.RequireSandbox)
-        {
-            return Failure("shell_command was refused: no operating-system sandbox is available on this system.");
-        }
-
-        using var process = new Process
-        {
-            StartInfo = processSpec.StartInfo,
-            EnableRaisingEvents = true,
-        };
-
+        ShellProcessHandle process;
         try
         {
-            if (!process.Start())
+            if (options.ProcessSandbox is { } sandbox)
             {
-                return Failure("shell_command did not start a process.");
+                var contained = sandbox.TrySpawn(processSpec.StartInfo, timeout);
+                if (contained is null && sandbox.RequireSandbox)
+                {
+                    return Failure("shell_command was refused: MXC cannot contain processes on this system.");
+                }
+
+                process = contained is not null ? ShellProcessHandle.FromMxc(contained) : ShellProcessHandle.Start(processSpec.StartInfo);
+            }
+            else
+            {
+                process = ShellProcessHandle.Start(processSpec.StartInfo);
             }
         }
-        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or Microsoft.Mxc.Sdk.V1.MxcException)
         {
             return Failure($"shell_command failed to start: {ex.Message}");
         }
+
+        using var processOwner = process;
 
         // A child may retain the redirected pipes after the shell exits. Keep the same
         // deadline alive until both streams finish, not merely until WaitForExitAsync.
@@ -755,10 +757,10 @@ public static class AgentBuiltInToolFactory
         }
         catch (OperationCanceledException) when (executionCts.IsCancellationRequested)
         {
-            TryKill(process);
+            process.TryKill();
             // Killing only asks the system to end the shell: wait a bounded time for it to be gone, so the tool does not report
             // the end of a command whose shell still runs in its folder (and holds it as its working directory).
-            await WaitForKilledProcessAsync(process).ConfigureAwait(false);
+            await process.WaitForKilledAsync(KilledProcessExitTimeout).ConfigureAwait(false);
             // Join both canceled readers before disposing their process/stream owners.
             // Do not try to rediscover orphaned children by PID after the shell has exited.
             try
@@ -1847,32 +1849,6 @@ public static class AgentBuiltInToolFactory
         return JsonDocument.Parse(stream.ToArray()).RootElement.Clone();
     }
 
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
-        {
-        }
-    }
-
-    private static async Task WaitForKilledProcessAsync(Process process)
-    {
-        try
-        {
-            // The shell's own exit, not the end of its output: a child that outlives it may still hold the pipes.
-            await process.WaitForExitAsync().WaitAsync(KilledProcessExitTimeout).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is TimeoutException or InvalidOperationException)
-        {
-        }
-    }
-
     private static string GetRequiredString(JsonElement element, string propertyName)
     {
         var value = GetOptionalString(element, propertyName);
@@ -1930,6 +1906,114 @@ public static class AgentBuiltInToolFactory
     }
 
     private sealed record ShellProcessSpec(ProcessStartInfo StartInfo);
+
+    // A started shell, either a local process or one that runs inside an MXC container.
+    private sealed class ShellProcessHandle : IDisposable
+    {
+        private readonly Process? _process;
+        private readonly Microsoft.Mxc.Sdk.V1.MxcProcess? _contained;
+        private Task<int>? _containedExit;
+
+        private ShellProcessHandle(Process? process, Microsoft.Mxc.Sdk.V1.MxcProcess? contained, StreamReader standardOutput, StreamReader standardError)
+        {
+            _process = process;
+            _contained = contained;
+            StandardOutput = standardOutput;
+            StandardError = standardError;
+        }
+
+        public StreamReader StandardOutput { get; }
+
+        public StreamReader StandardError { get; }
+
+        public int ExitCode => _process?.ExitCode ?? (_containedExit is { IsCompletedSuccessfully: true } exit ? exit.Result : -1);
+
+        public static ShellProcessHandle Start(ProcessStartInfo startInfo)
+        {
+            var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            try
+            {
+                if (!process.Start())
+                {
+                    throw new InvalidOperationException("shell_command did not start a process.");
+                }
+            }
+            catch
+            {
+                process.Dispose();
+                throw;
+            }
+
+            return new ShellProcessHandle(process, null, process.StandardOutput, process.StandardError);
+        }
+
+        public static ShellProcessHandle FromMxc(Microsoft.Mxc.Sdk.V1.MxcProcess contained)
+        {
+            contained.StandardInput?.Dispose();
+            return new ShellProcessHandle(
+                null,
+                contained,
+                new StreamReader(contained.StandardOutput ?? Stream.Null),
+                new StreamReader(contained.StandardError ?? Stream.Null));
+        }
+
+        public async Task WaitForExitAsync(CancellationToken cancellationToken)
+        {
+            if (_process is not null)
+            {
+                await _process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            _containedExit ??= WaitContainedAsync();
+            await _containedExit.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        public void TryKill()
+        {
+            try
+            {
+                if (_process is not null)
+                {
+                    if (!_process.HasExited)
+                    {
+                        _process.Kill(entireProcessTree: true);
+                    }
+                }
+                else
+                {
+                    _contained!.Kill();
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or Microsoft.Mxc.Sdk.V1.MxcException)
+            {
+            }
+        }
+
+        public async Task WaitForKilledAsync(TimeSpan timeout)
+        {
+            try
+            {
+                // The shell's own exit, not the end of its output: a child that outlives it may still hold the pipes.
+                await WaitForExitAsync(CancellationToken.None).WaitAsync(timeout).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or Microsoft.Mxc.Sdk.V1.MxcException)
+            {
+            }
+        }
+
+        public void Dispose()
+        {
+            _process?.Dispose();
+            _contained?.Dispose();
+        }
+
+        private async Task<int> WaitContainedAsync()
+        {
+            var result = await _contained!.WaitAsync().ConfigureAwait(false);
+            return result.ExitCode;
+        }
+    }
 
     private readonly record struct WorkspacePathResolution(string FullPath, string DisplayPath);
 

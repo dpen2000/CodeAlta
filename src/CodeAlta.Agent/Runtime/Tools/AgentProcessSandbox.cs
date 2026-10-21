@@ -1,155 +1,169 @@
 using System.Diagnostics;
-using System.Text;
+using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.V1.Policy;
 
 namespace CodeAlta.Agent.Runtime.Tools;
 
 /// <summary>
-/// Wraps the processes an agent starts (<c>shell_command</c>) in an operating-system sandbox that lets them read and
-/// write only inside the repository the session works in (and the system folders needed to run programs).
+/// Runs the processes an agent starts (<c>shell_command</c>) inside an MXC container
+/// (<see href="https://github.com/microsoft/mxc"/>): they may write only inside the repository the session works in
+/// (and the temporary folder), and read only it plus the tools and system folders needed to run programs.
 /// </summary>
 /// <remarks>
-/// Linux uses bubblewrap (<c>bwrap</c>), macOS uses <c>sandbox-exec</c>. Where neither is available (Windows, or a
-/// machine without the tool) <see cref="TryWrap"/> returns false: the caller decides whether to run unsandboxed.
+/// MXC picks the native backend of the host: ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
 /// </remarks>
 public sealed class AgentProcessSandbox
 {
-    private static readonly string[] LinuxSystemFolders = ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/run/systemd/resolve"];
-
     private readonly string[] _roots;
-    private readonly bool _requireSandbox;
 
     /// <summary>Creates the sandbox of a session.</summary>
     /// <param name="roots">The folders the sandboxed processes may read and write.</param>
-    /// <param name="requireSandbox">True to refuse to run a command where no sandbox is available.</param>
+    /// <param name="requireSandbox">True to refuse to run a command where MXC cannot contain it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="roots"/> is null.</exception>
     public AgentProcessSandbox(IEnumerable<string> roots, bool requireSandbox = false)
     {
         ArgumentNullException.ThrowIfNull(roots);
         _roots = [.. roots.Where(static r => !string.IsNullOrWhiteSpace(r)).Select(static r => Path.GetFullPath(r)).Distinct()];
-        _requireSandbox = requireSandbox;
+        RequireSandbox = requireSandbox;
     }
 
     /// <summary>Gets the folders the sandboxed processes may use.</summary>
     public IReadOnlyList<string> Roots => _roots;
 
-    /// <summary>Gets whether a command is refused where no sandbox is available.</summary>
-    public bool RequireSandbox => _requireSandbox;
+    /// <summary>Gets whether a command is refused where MXC cannot contain it.</summary>
+    public bool RequireSandbox { get; }
 
     /// <summary>
-    /// Rewrites a start info so that the process runs inside the sandbox.
+    /// Answers whether MXC can contain processes on this host.
     /// </summary>
-    /// <param name="startInfo">The start info, rewritten in place.</param>
-    /// <returns>True when the process is sandboxed; false when no sandbox is available on this system.</returns>
+    /// <returns>True when the MXC SDK and a backend are available.</returns>
+    public static bool IsAvailable()
+    {
+        try
+        {
+            return MxcPlatform.GetPlatformSupport().IsSupported;
+        }
+        catch (Exception ex) when (ex is MxcException or DllNotFoundException or BadImageFormatException or EntryPointNotFoundException or PlatformNotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Builds the MXC request that runs a process as <paramref name="startInfo"/> describes it.
+    /// </summary>
+    /// <param name="startInfo">The process: its program, arguments, folder and environment.</param>
+    /// <param name="timeoutMs">The time limit of the command in milliseconds; null or 0 for none.</param>
+    /// <returns>The request.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="startInfo"/> is null.</exception>
-    public bool TryWrap(ProcessStartInfo startInfo)
+    public ContainerRequest CreateRequest(ProcessStartInfo startInfo, int? timeoutMs = null)
     {
         ArgumentNullException.ThrowIfNull(startInfo);
-        if (OperatingSystem.IsLinux() && FindOnPath("bwrap") is { } bwrap)
+        var readWrite = new List<string>(_roots);
+        var readOnly = new List<string>();
+        AddFragment(Filesystem.GetAvailableToolsPolicy(), readOnly, readWrite);
+        AddFragment(Filesystem.GetTemporaryFilesPolicy(), readOnly, readWrite);
+        if (OperatingSystem.IsWindows())
         {
-            Wrap(startInfo, bwrap, CreateBubblewrapArguments(startInfo));
-            return true;
+            AddFragment(Filesystem.GetUserProfilePolicy(), readOnly, readWrite);
         }
-
-        if (OperatingSystem.IsMacOS() && File.Exists("/usr/bin/sandbox-exec"))
+        else
         {
-            Wrap(startInfo, "/usr/bin/sandbox-exec", CreateSandboxExecArguments(startInfo));
-            return true;
-        }
-
-        return false;
-    }
-
-    private IReadOnlyList<string> CreateBubblewrapArguments(ProcessStartInfo startInfo)
-    {
-        var args = new List<string> { "--die-with-parent", "--unshare-pid", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp" };
-        foreach (var folder in LinuxSystemFolders)
-        {
-            if (Directory.Exists(folder))
+            foreach (var folder in new[] { "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/System", "/Library", "/private/etc" })
             {
-                args.Add("--ro-bind");
-                args.Add(folder);
-                args.Add(folder);
-            }
-        }
-
-        foreach (var root in _roots)
-        {
-            args.Add("--bind");
-            args.Add(root);
-            args.Add(root);
-        }
-
-        args.Add("--chdir");
-        args.Add(startInfo.WorkingDirectory);
-        return args;
-    }
-
-    private IReadOnlyList<string> CreateSandboxExecArguments(ProcessStartInfo startInfo)
-    {
-        var profile = new StringBuilder("(version 1)(allow default)");
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        if (!string.IsNullOrEmpty(home))
-        {
-            profile.Append("(deny file-read* (subpath ").Append(Quote(home)).Append("))");
-        }
-
-        profile.Append("(deny file-write*)(allow file-write* (subpath \"/dev\") (subpath \"/private/tmp\") (subpath \"/private/var/folders\")");
-        foreach (var root in _roots)
-        {
-            profile.Append(" (subpath ").Append(Quote(root)).Append(')');
-        }
-
-        profile.Append(')');
-        foreach (var root in _roots)
-        {
-            profile.Append("(allow file-read* (subpath ").Append(Quote(root)).Append("))");
-        }
-
-        return ["-p", profile.ToString()];
-    }
-
-    private static string Quote(string value)
-        => "\"" + value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
-
-    private static void Wrap(ProcessStartInfo startInfo, string wrapper, IReadOnlyList<string> wrapperArguments)
-    {
-        var original = new List<string> { startInfo.FileName };
-        original.AddRange(startInfo.ArgumentList);
-        startInfo.FileName = wrapper;
-        startInfo.ArgumentList.Clear();
-        foreach (var argument in wrapperArguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-
-        if (Path.GetFileName(wrapper) == "bwrap")
-        {
-            startInfo.ArgumentList.Add("--");
-        }
-
-        foreach (var argument in original)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-    }
-
-    private static string? FindOnPath(string fileName)
-    {
-        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty).Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            try
-            {
-                var candidate = Path.Combine(directory.Trim('"'), fileName);
-                if (File.Exists(candidate))
+                if (Directory.Exists(folder))
                 {
-                    return candidate;
+                    readOnly.Add(folder);
                 }
             }
-            catch (ArgumentException)
+        }
+
+        var environment = new Dictionary<string, string>();
+        foreach (var pair in startInfo.Environment)
+        {
+            if (pair.Value is not null)
             {
+                environment[pair.Key] = pair.Value;
             }
         }
 
-        return null;
+        var request = new ContainerRequest(BuildCommandLine(startInfo))
+        {
+            Filesystem = new FilesystemPolicy
+            {
+                ReadwritePaths = [.. readWrite.Distinct()],
+                ReadonlyPaths = [.. readOnly.Except(readWrite).Distinct()],
+            },
+            WorkingDirectory = startInfo.WorkingDirectory,
+            Environment = environment,
+        };
+        if (timeoutMs is > 0)
+        {
+            request.TimeoutMs = (uint)timeoutMs.Value;
+        }
+
+        return request;
+    }
+
+    /// <summary>
+    /// Starts a process inside the container.
+    /// </summary>
+    /// <param name="startInfo">The process.</param>
+    /// <param name="timeoutMs">The time limit of the command in milliseconds; null or 0 for none.</param>
+    /// <returns>The live process, or null when MXC cannot contain processes on this host.</returns>
+    /// <exception cref="MxcException">MXC refused the request.</exception>
+    public MxcProcess? TrySpawn(ProcessStartInfo startInfo, int? timeoutMs = null)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        return IsAvailable() ? MxcContainer.Spawn(CreateRequest(startInfo, timeoutMs)) : null;
+    }
+
+    private static void AddFragment(FilesystemPolicyResult fragment, List<string> readOnly, List<string> readWrite)
+    {
+        readOnly.AddRange(fragment.ReadonlyPaths);
+        readWrite.AddRange(fragment.ReadwritePaths);
+    }
+
+    private static string BuildCommandLine(ProcessStartInfo startInfo)
+    {
+        var parts = new List<string> { startInfo.FileName };
+        parts.AddRange(startInfo.ArgumentList);
+        return string.Join(' ', parts.Select(static p => OperatingSystem.IsWindows() ? QuoteWindows(p) : QuotePosix(p)));
+    }
+
+    private static string QuotePosix(string value)
+        => "'" + value.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+
+    // The command line is parsed by CreateProcess: backslashes before a quote are doubled, and the quote escaped.
+    private static string QuoteWindows(string value)
+    {
+        if (value.Length > 0 && value.IndexOfAny([' ', '\t', '\n', '"']) < 0)
+        {
+            return value;
+        }
+
+        var builder = new System.Text.StringBuilder("\"");
+        var backslashes = 0;
+        foreach (var c in value)
+        {
+            if (c == '\\')
+            {
+                backslashes++;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                builder.Append('\\', backslashes * 2 + 1).Append('"');
+            }
+            else
+            {
+                builder.Append('\\', backslashes).Append(c);
+            }
+
+            backslashes = 0;
+        }
+
+        return builder.Append('\\', backslashes * 2).Append('"').ToString();
     }
 }

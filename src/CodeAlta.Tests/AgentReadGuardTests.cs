@@ -34,3 +34,25 @@ public sealed class AgentReadGuardTests
         }
     }
 }
+
+[TestClass]
+public sealed class AgentProcessSandboxTests
+{
+    [TestMethod]
+    public void CreateRequest_GrantsWriteOnlyToTheRepository_AndQuotesTheCommandLine()
+    {
+        var repo = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "alta-sbx-repo"));
+        var info = new System.Diagnostics.ProcessStartInfo("/bin/sh") { WorkingDirectory = repo };
+        info.ArgumentList.Add("-c");
+        info.ArgumentList.Add("echo 'hi'");
+        var request = new AgentProcessSandbox([repo]).CreateRequest(info, 5000);
+
+        CollectionAssert.Contains(request.Filesystem!.ReadwritePaths, repo);
+        Assert.AreEqual(repo, request.WorkingDirectory);
+        Assert.AreEqual(5000u, request.TimeoutMs);
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.AreEqual("'/bin/sh' '-c' 'echo '\\''hi'\\'''", request.Command);
+        }
+    }
+}
